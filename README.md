@@ -34,6 +34,8 @@ A NuGet package for ASP.NET Core MVC and Razor Pages applications hosted as ifra
 | **Activity Tracking** | Automatic iframe activity detection and session timeout prevention |
 | **Session Timeout Warning** | Configurable countdown dialog before session expiration with renew/end options |
 | **Toast Notifications** | Cross-iframe notification system via `window.postMessage` |
+| **Iframe Security** | Antiforgery configured for iframe hosting (`X-Frame-Options` suppressed, `SameSite=None`, `Secure`) |
+| **Structured Logging** | Serilog logging and ASP.NET Core session configured via `Corp.Lib.Logging` |
 | **Standalone Mode** | Run applications independently during development |
 | **Tag Helpers** | Easy integration with `<voyagerux-scripts />`, `<voyagerux-tracking-meta />`, and `<voyagerux-feature-tests />` |
 | **CSP Compliant** | No inline JavaScript - configuration via data attributes |
@@ -92,17 +94,22 @@ using Corp.Web.VoyagerUx.HostedApp.Extensions;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add VoyagerUx hosted app services
-builder.AddVoyagerUxHostedApp(options =>
-{
-    builder.Configuration.GetSection("VoyagerUxSettings").Bind(options);
-});
+// Add VoyagerUx hosted app services (includes Serilog logging, session, and antiforgery)
+builder.AddVoyagerUxHostedApp(
+    configure: options =>
+    {
+        builder.Configuration.GetSection("VoyagerUxSettings").Bind(options);
+    },
+    sessionExpirationInMinutes: 60  // Must match the portal's SessionExpirationInMinutes value
+);
 
 var app = builder.Build();
 
+// Configure VoyagerUx middleware (includes Serilog request logging and session middleware)
+app.UseVoyagerUxHostedApp();
+
 app.UseStaticFiles();  // Required for scripts and CSS
 app.UseRouting();
-app.UseAuthorization();
 
 app.MapControllerRoute(
     name: "default",
@@ -113,6 +120,8 @@ app.MapControllerRoute(
 
 app.Run();
 ```
+
+> **Important:** Do not call `builder.AddLogging()` or `app.UseLogging()` separately — `AddVoyagerUxHostedApp` and `UseVoyagerUxHostedApp` handle these internally.
 
 ### 3. Add Scripts and CSS to Layout
 
@@ -134,11 +143,14 @@ Add to `_ViewImports.cshtml`:
 ```
 
 **Done!** Your application now has:
+- ✅ Serilog structured logging (via `Corp.Lib.Logging`)
+- ✅ ASP.NET Core session with configurable timeout
+- ✅ Antiforgery configured for iframe hosting (`X-Frame-Options` suppressed, `SameSite=None`)
 - ✅ MVC Controllers + Views (or Razor Pages)
 - ✅ JSON serialization (`PropertyNamingPolicy = null`)
 - ✅ Shared session management
 - ✅ Navigation history tracking (via client-side postMessage)
-- ✅ Activity tracking
+- ✅ Activity tracking with automatic session-expired overlay
 - ✅ Navigation control
 - ✅ Toast notifications
 - ✅ Consistent portal styling
@@ -209,6 +221,38 @@ The package validates configuration on startup and throws `InvalidOperationExcep
 |-------|----------|
 | `VoyagerUxSettings.AppName is required` | Add `AppName` to your configuration |
 | `VoyagerUxSettings.PortalBaseUrl is required` | Add `PortalBaseUrl` or set `StandaloneMode: true` |
+
+---
+
+## Internally Configured Services
+
+`AddVoyagerUxHostedApp` configures the following services automatically. Do not configure these separately.
+
+### Serilog Logging & Session
+
+Calls `Corp.Lib.Logging.AddLogging(true, sessionExpirationInMinutes)` internally, which:
+- Configures Serilog as the logging provider
+- Enables ASP.NET Core session with the specified idle timeout
+- Registers the `Corp.Lib.Logging.Logger.Log` static Serilog instance
+
+`UseVoyagerUxHostedApp` calls `Corp.Lib.Logging.UseLogging(true)` internally, which:
+- Adds the Serilog request logging middleware
+- Adds the ASP.NET Core session middleware
+
+The `sessionExpirationInMinutes` parameter on `AddVoyagerUxHostedApp` controls the server-side session idle timeout and must match the portal's `SessionExpirationInMinutes` configuration value.
+
+### Antiforgery for Iframe Hosting
+
+Configures ASP.NET Core antiforgery for cross-origin iframe hosting:
+
+| Setting | Value | Reason |
+|---------|-------|--------|
+| `SuppressXFrameOptionsHeader` | `true` | Allows the application to be loaded inside the portal's iframe |
+| `Cookie.SameSite` | `None` | Required for cross-origin cookie access between portal and iframe |
+| `Cookie.SecurePolicy` | `Always` | Required when `SameSite=None` (browsers reject insecure `None` cookies) |
+| `Cookie.Expiration` | `120 minutes` | Set to the Citrix session timeout (2 hours) |
+
+> **Note:** These antiforgery settings are critical for iframe operation. The `X-Frame-Options` header is suppressed so the browser allows the hosted app to render inside the portal iframe. The `SameSite=None` + `Secure` combination is required by modern browsers for cross-origin cookies.
 
 ---
 
@@ -657,14 +701,20 @@ builder.AddLogging(true, sessionExpirationInMinutes);
 
 #### Hosted App Session Configuration
 
-Each hosted application should set its session timeout to match the portal using the `Corp.Lib.Logging` call in `Program.cs`:
+Each hosted application sets its session timeout via the `sessionExpirationInMinutes` parameter on `AddVoyagerUxHostedApp`, which passes it to `Corp.Lib.Logging.AddLogging` internally:
 
 ```csharp
 // In the hosted application's Program.cs
-builder.AddLogging(true, 60);  // enableSession: true, sessionExpirationInMinutes: 60
+builder.AddVoyagerUxHostedApp(
+    configure: options =>
+    {
+        builder.Configuration.GetSection("VoyagerUxSettings").Bind(options);
+    },
+    sessionExpirationInMinutes: 60  // Must match the portal's SessionExpirationInMinutes value
+);
 ```
 
-> **Important:** All applications (portal and hosted apps) should use the same session timeout value to ensure consistent behavior. The portal handles the countdown dialog; individual hosted apps only need to keep their server-side session timeout in sync.
+> **Important:** All applications (portal and hosted apps) should use the same session timeout value to ensure consistent behavior. The portal handles the countdown dialog; individual hosted apps only need to keep their server-side session timeout in sync. Do not call `builder.AddLogging()` separately — it is called internally by `AddVoyagerUxHostedApp`.
 
 #### JavaScript Events
 
@@ -840,6 +890,9 @@ For development outside the VoyagerUx portal:
 
 | Feature | Standalone Mode |
 |---------|----------------|
+| Serilog logging | ✅ Enabled |
+| ASP.NET Core session | ✅ Enabled |
+| Antiforgery for iframe hosting | ✅ Enabled |
 | MVC Controllers + Views | ✅ Enabled |
 | Razor Pages | ✅ Enabled |
 | JSON serialization options | ✅ Enabled |
@@ -1058,7 +1111,7 @@ _navigation?.NavigateToUrl("/page");
 | Property | Value |
 |----------|-------|
 | **Package ID** | `Corp.Web.VoyagerUx.HostedApp` |
-| **Version** | `10.0.8` |
+| **Version** | `10.1.3` |
 | **Target Framework** | `net10.0` |
 | **License** | MIT |
 | **Authors** | Mathew Hamilton |
@@ -1077,13 +1130,22 @@ wwwroot/css/
 
 | Package | Version | Notes |
 |---------|---------|-------|
-| `Corp.Lib.Security.Permissions` | 10.1.10 | Required for session user resolution |
+| `Corp.Lib.Security.Permissions` | 10.2.1 | Required for session user resolution |
 | `Corp.Web.VoyagerUx.Lib` | (bundled) | Included in package - provides attributes, interfaces, and filters |
-| `Corp.Lib.Logging` | 10.1.4 | Bundled via Lib |
+| `Corp.Lib.Logging` | (transitive) | Configured internally by `AddVoyagerUxHostedApp` |
 
 ---
 
 ## Changelog
+
+### v10.1.3
+
+- `AddVoyagerUxHostedApp` now calls `Corp.Lib.Logging.AddLogging` internally with configurable `sessionExpirationInMinutes` parameter (default: 60)
+- Added `UseVoyagerUxHostedApp` extension method that calls `Corp.Lib.Logging.UseLogging` internally
+- Added antiforgery configuration for iframe hosting (`SuppressXFrameOptionsHeader`, `SameSite=None`, `SecurePolicy=Always`, 120-minute cookie expiration)
+- Added automatic session-expired blocking overlay inside hosted iframes
+- Added portal-to-iframe session event broadcasting (`voyagerux-session-warning`, `voyagerux-session-renewed`, `voyagerux-session-ended`, `voyagerux-session-expired`)
+- Updated dependency: `Corp.Lib.Security.Permissions` 10.2.1
 
 ### v10.0.8
 
