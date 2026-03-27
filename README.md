@@ -32,6 +32,7 @@ A NuGet package for ASP.NET Core MVC and Razor Pages applications hosted as ifra
 | **Navigation History Tracking** | Automatic user navigation tracking with `[TrackNavigationHistory]` attribute via client-side postMessage |
 | **Navigation Control** | Control parent portal navigation from iframe apps |
 | **Activity Tracking** | Automatic iframe activity detection and session timeout prevention |
+| **Session Timeout Warning** | Configurable countdown dialog before session expiration with renew/end options |
 | **Toast Notifications** | Cross-iframe notification system via `window.postMessage` |
 | **Standalone Mode** | Run applications independently during development |
 | **Tag Helpers** | Easy integration with `<voyagerux-scripts />`, `<voyagerux-tracking-meta />`, and `<voyagerux-feature-tests />` |
@@ -592,6 +593,8 @@ Automatically tracks user activity to prevent session timeouts. Auto-initialized
 1. Script registers with parent portal on load
 2. User interactions (clicks, mouse presses, keypresses, scroll, touch, focus) trigger activity pings
 3. Parent portal receives pings and resets session timeout
+4. When the portal signals session end or expiration, a blocking overlay is automatically shown inside the iframe
+5. If the session is renewed, the overlay is removed and activity tracking resumes
 
 #### Client-Side API (JavaScript)
 
@@ -607,6 +610,98 @@ console.log(status.activityCount);  // Number of pings sent
 console.log(status.isRegistered);   // Registration status
 console.log(status.lastActivitySent);   // Last activity timestamp
 ```
+
+---
+
+### Session Timeout Warning
+
+The VoyagerUx portal displays a countdown dialog before session expiration. This feature is configured via the portal's `IConfiguration` and works automatically with the activity tracking system.
+
+#### How It Works
+
+1. The portal reads `SessionExpirationInMinutes` and `SessionExpirationWarningInMinutes` from configuration
+2. Each iframe-hosted application sends activity pings to the portal via `postMessage`
+3. The portal's activity tracker sends heartbeats to the server, renewing the session
+4. When there is no activity for `(SessionExpirationInMinutes - SessionExpirationWarningInMinutes)` minutes, a countdown dialog appears
+5. The user can choose to **Continue Session** (renews the timeout) or **End Session** (clears all session data)
+6. If the countdown reaches zero, the session expires and a full-page overlay is shown
+7. Hosted iframes are automatically notified and display their own blocking overlay — **no hosted app code required**
+
+#### Portal Configuration
+
+The following configuration keys must be set on the **portal** application (not the hosted apps):
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `SessionExpirationInMinutes` | `int` | `60` | Total session timeout in minutes |
+| `SessionExpirationWarningInMinutes` | `int` | `5` | Minutes before expiration to show the warning dialog |
+
+These values come from `IConfiguration` (typically via `Corp.Api.Configuration.Lib`).
+
+#### Portal Program.cs Session Wiring
+
+The portal reads `SessionExpirationInMinutes` from configuration and passes it to `Corp.Lib.Logging.AddLogging` so the server-side ASP.NET session timeout matches the client-side countdown. Note that `AddConfigurationApiAndLoadConfigurations` must be called first to ensure the configuration value is available:
+
+```csharp
+// In the portal's Program.cs
+var builder = WebApplication.CreateBuilder(args);
+
+builder.AddSecurityPermissionsLibrary();
+
+builder.AddConfigurationApiAndLoadConfigurations();
+
+var sessionExpirationInMinutes = builder.Configuration.GetValue("SessionExpirationInMinutes", 60);
+
+builder.AddLogging(true, sessionExpirationInMinutes);
+```
+
+#### Hosted App Session Configuration
+
+Each hosted application should set its session timeout to match the portal using the `Corp.Lib.Logging` call in `Program.cs`:
+
+```csharp
+// In the hosted application's Program.cs
+builder.AddLogging(true, 60);  // enableSession: true, sessionExpirationInMinutes: 60
+```
+
+> **Important:** All applications (portal and hosted apps) should use the same session timeout value to ensure consistent behavior. The portal handles the countdown dialog; individual hosted apps only need to keep their server-side session timeout in sync.
+
+#### JavaScript Events
+
+The portal broadcasts session events to all registered iframes via `postMessage`. The `voyagerux-activity.js` script automatically converts these into local `window` `CustomEvent`s that your hosted application code can listen for:
+
+| Event | Fired When | Description |
+|-------|-----------|-------------|
+| `voyagerux:session-warning` | Warning dialog appears | Session is about to expire; `detail` includes `expirationMinutes` and `warningMinutes` |
+| `voyagerux:session-renewed` | User clicks "Continue Session" | Session has been renewed with a fresh timeout |
+| `voyagerux:session-ended` | User clicks "End Session" | User chose to end the session |
+| `voyagerux:session-expired` | Countdown reaches zero | No user action; session has expired |
+
+```javascript
+// Listen for session events in a hosted iframe application
+window.addEventListener('voyagerux:session-warning', function (e) {
+    console.log('Session expiring soon', e.detail);
+});
+
+window.addEventListener('voyagerux:session-expired', function () {
+    console.log('Session has expired');
+});
+
+window.addEventListener('voyagerux:session-renewed', function (e) {
+    console.log('Session renewed', e.detail);
+});
+```
+
+> **Note:** All session lifecycle handling is automatic. Activity tracking pauses on session end/expire and resumes on renewal. A blocking overlay is shown inside the iframe when the session ends — **hosted applications do not need any code to handle session timeout**. The events above are available for optional custom behavior (e.g., canceling background operations).
+
+#### Portal API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/session/config` | `GET` | Returns `{ expirationMinutes, warningMinutes }` |
+| `/api/session/heartbeat` | `POST` | Renews session; body: `{ source }` |
+| `/api/session/status` | `GET` | Returns session status and remaining time |
+| `/api/session/end` | `POST` | Ends the session and clears all shared data |
 
 ---
 
