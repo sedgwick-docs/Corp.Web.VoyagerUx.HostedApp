@@ -52,7 +52,7 @@ dotnet add package Corp.Web.VoyagerUx.HostedApp
 ### Package Reference
 
 ```xml
-<PackageReference Include="Corp.Web.VoyagerUx.HostedApp" Version="10.0.8" />
+<PackageReference Include="Corp.Web.VoyagerUx.HostedApp" Version="10.1.3" />
 ```
 
 ---
